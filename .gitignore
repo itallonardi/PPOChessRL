@@ -3,6 +3,16 @@ __pycache__/
 *.py[cod]
 *$py.class
 
+# Tensorboard and Stockfish folders
+ppo_chess_tensorboard/
+stockfish/
+
+# Ignore everything in the models directory
+models/*
+
+# But keep the directory itself and the .gitkeep file
+!models/.gitkeep
+
 # C extensions
 *.so
 
