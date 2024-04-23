@@ -23,7 +23,7 @@ The project utilizes the `stable-baselines3` library and Stockfish engine to cre
 
 Clone the repository and navigate into its folder:
 ```bash
-git clone https://github.com/your-username/ChessRL.git
+git clone https://github.com/itallonardi/PPOChessRL
 cd ChessRL
 ```
 
