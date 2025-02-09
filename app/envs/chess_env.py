@@ -54,13 +54,13 @@ class ChessEnv(Env):
 
     def step(self, action):
         """
-        Executes a step in the environment:
-          1) Retrieve the evaluation of the current board state (before the agent moves).
-          2) The agent performs its move.
-          3) If the opponent is Stockfish (or 'both' with stockfish_is_opponent=True),
-             Stockfish makes its move.
-          4) Compute and return the reward based on Stockfish's evaluations,
-             considering perspective for white/black (pure difference plus checkmate).
+        Executes a step for the agent ONLY. Does not automatically perform the opponent's move.
+
+        1) Retrieve the evaluation of the current board state (before the agent moves).
+        2) The agent performs its move.
+        3) Compute and return the reward based on Stockfish's evaluations,
+           considering perspective for white/black (pure difference plus checkmate).
+        4) No Stockfish move is performed here (call step_opponent() if needed).
 
         :param action: The index of the move chosen by the agent.
         :return: (observation, reward, done, info)
@@ -76,30 +76,66 @@ class ChessEnv(Env):
         move = self.decode_action(action)
         if move and move in self.board.legal_moves:
             self.board.push(move)
-
-            # 3) Stockfish's move if applicable
-            if (self.opponent == 'stockfish' or (self.opponent == 'both' and self.stockfish_is_opponent)) \
-               and not self.board.is_game_over():
-                self.stockfish.set_fen_position(self.board.fen())
-                best_move = self.stockfish.get_best_move()
-                if best_move:
-                    self.board.push(chess.Move.from_uci(best_move))
+            self.legal_moves += 1
 
             # Save the current state (including turn channel) in history
             self.move_history.append(self.board_to_observation()[:, :, :13])
             if len(self.move_history) > self.history_length:
                 self.move_history.pop(0)
-            self.legal_moves += 1
 
+            # 3) Reward and done
             done = self.board.is_game_over()
-
-            # 4) Compute the reward
             reward = self.calculate_reward(previous_evaluation)
             return self.board_to_observation(), reward, done, {}
         else:
             # Illegal move
             self.illegal_moves += 1
             return self.board_to_observation(), -1, False, {}
+
+    def step_opponent(self):
+        """
+        Performs the opponent's move (Stockfish or otherwise), if applicable, in a separate step.
+        This allows a more explicit turn-based approach: agent moves in step(), then if not done,
+        you call step_opponent() to let Stockfish play.
+
+        NOTE: This method does nothing if:
+          - The game is already over, or
+          - The opponent is 'self' (no external move needed).
+
+        :return: (observation, reward, done, info)
+        """
+        # If game is over or there's no actual opponent move, do nothing
+        if self.board.is_game_over() or self.opponent == 'self':
+            return self.board_to_observation(), 0, self.board.is_game_over(), {}
+
+        if self.opponent == 'stockfish' or (self.opponent == 'both' and self.stockfish_is_opponent):
+            # Evaluate before Stockfish moves
+            if self.stockfish:
+                self.stockfish.set_fen_position(self.board.fen())
+                previous_evaluation = self.stockfish.get_evaluation()
+            else:
+                previous_evaluation = None
+
+            best_move = None
+            if self.stockfish and not self.board.is_game_over():
+                best_move = self.stockfish.get_best_move()
+
+            if best_move:
+                self.board.push(chess.Move.from_uci(best_move))
+                self.legal_moves += 1
+
+                # Update history
+                self.move_history.append(
+                    self.board_to_observation()[:, :, :13])
+                if len(self.move_history) > self.history_length:
+                    self.move_history.pop(0)
+
+                done = self.board.is_game_over()
+                reward = self.calculate_reward(previous_evaluation)
+                return self.board_to_observation(), reward, done, {}
+
+        # If we got here, there's no move or we didn't push anything
+        return self.board_to_observation(), 0, self.board.is_game_over(), {}
 
     def board_to_observation(self):
         """
@@ -135,7 +171,7 @@ class ChessEnv(Env):
           - Clears move history.
           - Resets counters for illegal and legal moves, checks, and checkmates.
           - Randomizes whether the model is white or black if opponent is Stockfish or both.
-          - Makes Stockfish's first move if Stockfish is white.
+          - Makes Stockfish's first move if Stockfish is white (optional).
         """
         self.board.reset()
         self.move_history = []
@@ -151,12 +187,14 @@ class ChessEnv(Env):
             else:
                 self.stockfish_is_opponent = True
 
+            # Optionally let Stockfish move first if it's white
             if not self.model_plays_white and self.stockfish_is_opponent:
-                # If Stockfish is playing white, make the first move
-                self.stockfish.set_fen_position(self.board.fen())
-                first_move = self.stockfish.get_best_move()
-                if first_move:
-                    self.board.push(chess.Move.from_uci(first_move))
+                if self.stockfish:
+                    self.stockfish.set_fen_position(self.board.fen())
+                    first_move = self.stockfish.get_best_move()
+                    if first_move:
+                        self.board.push(chess.Move.from_uci(first_move))
+                        self.legal_moves += 1
         else:
             self.model_plays_white = True
             self.stockfish_is_opponent = False
@@ -192,7 +230,7 @@ class ChessEnv(Env):
           - No extra reward from top Stockfish moves is added (purely difference-based).
 
         :param previous_evaluation: A dict with the 'type' ('cp' or 'mate') and 'value'
-                                    from the board state prior to the agent's move.
+                                    from the board state prior to the move.
         :return: The numeric reward for this step.
         """
         if self.stockfish:
