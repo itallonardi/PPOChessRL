@@ -13,7 +13,9 @@ class ChessEnv(Env):
       - An observation space encoding the board state plus move history.
       - Integration with Stockfish for reward calculation.
       - Support for different opponents: self, stockfish, or both.
-      - Store the 'turn' channel in the move history as well.
+      - Maskable PPO support via action_masks().
+      - Turn channel included in the historical states.
+      - Reward now purely difference-based (plus a large bonus/penalty for checkmates).
     """
     metadata = {'render.modes': ['human']}
 
@@ -33,7 +35,7 @@ class ChessEnv(Env):
         self.stockfish = Stockfish(stockfish_path) if stockfish_path else None
         if self.stockfish:
             self.stockfish.set_elo_rating(random.randint(*self.elo_range))
-        # Changed from (13 + 12 * history_length) to (13 + 13 * history_length)
+        # Note: shape includes turn channel + history. 13 for current state, plus 13 per history slot.
         self.action_space = spaces.Discrete(218)
         self.observation_space = spaces.Box(
             low=0, high=1,
@@ -58,7 +60,7 @@ class ChessEnv(Env):
           3) If the opponent is Stockfish (or 'both' with stockfish_is_opponent=True),
              Stockfish makes its move.
           4) Compute and return the reward based on Stockfish's evaluations,
-             considering perspective for white/black.
+             considering perspective for white/black (pure difference plus checkmate).
 
         :param action: The index of the move chosen by the agent.
         :return: (observation, reward, done, info)
@@ -83,7 +85,7 @@ class ChessEnv(Env):
                 if best_move:
                     self.board.push(chess.Move.from_uci(best_move))
 
-            # Changed from [:, :, :12] to [:, :, :13], storing the turn channel as well
+            # Save the current state (including turn channel) in history
             self.move_history.append(self.board_to_observation()[:, :, :13])
             if len(self.move_history) > self.history_length:
                 self.move_history.pop(0)
@@ -91,18 +93,18 @@ class ChessEnv(Env):
 
             done = self.board.is_game_over()
 
-            # 4) Compute the reward based on the previous evaluation
+            # 4) Compute the reward
             reward = self.calculate_reward(previous_evaluation)
             return self.board_to_observation(), reward, done, {}
         else:
+            # Illegal move
             self.illegal_moves += 1
             return self.board_to_observation(), -1, False, {}
 
     def board_to_observation(self):
         """
         Builds the observation tensor with shape (8, 8, 13 + 13 * history_length):
-          - First 13 channels for the current board state:
-             12 for piece positions, 1 for indicating if it's white's turn.
+          - First 13 channels for the current board state (12 for pieces + 1 for turn).
           - Next 13 channels per historical state stored in move_history.
         """
         observation = np.zeros(
@@ -119,7 +121,7 @@ class ChessEnv(Env):
         if self.board.turn == chess.WHITE:
             observation[:, :, 12] = 1  # White's turn channel
 
-        # Append historical states (13 channels each)
+        # Append historical states
         for i, hist in enumerate(self.move_history):
             start = 13 + 13 * i
             end = 13 + 13 * (i + 1)
@@ -185,9 +187,9 @@ class ChessEnv(Env):
         Calculates the reward based on Stockfish's evaluations:
           - If there is a checkmate (type 'mate'), returns +/-100000 depending on
             which side is winning, then applies perspective for the agent's color.
-          - Otherwise, uses centipawn evaluations to measure improvement/deterioration
-            of position from the agent's perspective. Also includes bonuses for the
-            top moves (MultiPV=3) returned by Stockfish.
+          - Otherwise, returns the difference in centipawns between current and previous
+            evaluation (also adjusted for agent's color if it is black).
+          - No extra reward from top Stockfish moves is added (purely difference-based).
 
         :param previous_evaluation: A dict with the 'type' ('cp' or 'mate') and 'value'
                                     from the board state prior to the agent's move.
@@ -198,34 +200,19 @@ class ChessEnv(Env):
             self.stockfish._set_option("UCI_ShowWDL", True)
             self.stockfish.set_fen_position(self.board.fen())
             current_evaluation = self.stockfish.get_evaluation()
-            best_moves = self.stockfish.get_top_moves(3)
 
             # Checkmate case
             if current_evaluation['type'] == 'mate':
                 raw_reward = 100000 if current_evaluation['value'] > 0 else -100000
                 return raw_reward if self.model_plays_white else -raw_reward
 
-            # Centipawn (cp) evaluation
+            # If not mate, do a simple difference-based reward
             raw_reward = 0
             if (previous_evaluation and previous_evaluation['type'] == 'cp'
                and current_evaluation['type'] == 'cp'):
                 # Difference in centipawns from Stockfish's perspective (white).
-                raw_reward += (current_evaluation['value']
-                               - previous_evaluation['value'])
-
-            # Reward from Stockfish's top moves
-            for move in best_moves:
-                if move.get('Mate') is not None:
-                    mate_in = move['Mate']
-                    move_value = 100000 / mate_in  # higher value for faster mate
-                else:
-                    move_value = move.get('Centipawn', 0)
-
-                raw_reward += move_value * 0.1
-
-                if 'wdl' in move:
-                    win, draw, loss = move['wdl']
-                    raw_reward += (win - loss) * 0.05
+                raw_reward = (current_evaluation['value']
+                              - previous_evaluation['value'])
 
             # Adjust for agent's color (if the agent is black, invert the sign)
             if not self.model_plays_white:
