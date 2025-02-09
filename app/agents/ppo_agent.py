@@ -18,6 +18,7 @@ def initialize_ppo(env, model_path=None):
         model = MaskablePPO(
             "MlpPolicy",
             env,
+            device="auto",
             verbose=1,
             tensorboard_log="./ppo_chess_tensorboard/",
             learning_rate=0.0003,
