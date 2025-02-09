@@ -3,6 +3,7 @@ import numpy as np
 from gym import Env, spaces
 from stockfish import Stockfish
 import random
+from app.callbacks.training_log_callback import approximate_rating_from_acpl
 
 
 class ChessEnv(Env):
@@ -19,7 +20,7 @@ class ChessEnv(Env):
     """
     metadata = {'render.modes': ['human']}
 
-    def __init__(self, stockfish_path=None, opponent='self', elo_range=(800, 2500), history_length=2):
+    def __init__(self, stockfish_path=None, opponent='self', elo_range=(800, 2500), history_length=2, environment_id=0):
         """
         Initializes the Chess environment.
 
@@ -27,6 +28,7 @@ class ChessEnv(Env):
         :param opponent: Type of opponent ('self', 'stockfish', or 'both').
         :param elo_range: Tuple for random ELO rating range of Stockfish.
         :param history_length: Number of previous board states (including turn channel) in the observation.
+        :param environment_id: Identifier for this environment instance.
         """
         super(ChessEnv, self).__init__()
         self.board = chess.Board()
@@ -54,6 +56,8 @@ class ChessEnv(Env):
         self.acpl_accumulator = 0.0
         self.acpl_steps = 0
 
+        self.environment_id = environment_id
+
     def step(self, action):
         """
         Executes a step for the agent ONLY. Does not automatically perform the opponent's move.
@@ -67,25 +71,21 @@ class ChessEnv(Env):
         :param action: The index of the move chosen by the agent.
         :return: (observation, reward, done, info)
         """
-        # 1) Evaluation before the agent moves (if Stockfish is available)
         if self.stockfish:
             self.stockfish.set_fen_position(self.board.fen())
             previous_evaluation = self.stockfish.get_evaluation()
         else:
             previous_evaluation = None
 
-        # 2) Agent makes its move
         move = self.decode_action(action)
         if move and move in self.board.legal_moves:
             self.board.push(move)
             self.legal_moves += 1
 
-            # Save the current state (including turn channel) in history
             self.move_history.append(self.board_to_observation()[:, :, :13])
             if len(self.move_history) > self.history_length:
                 self.move_history.pop(0)
 
-            # 3) Reward and done
             done = self.board.is_game_over()
             reward = self.calculate_reward(previous_evaluation)
 
@@ -109,13 +109,16 @@ class ChessEnv(Env):
                     episode_acpl = 0.0
                 info["episode_acpl"] = episode_acpl
 
+                approx_rating = approximate_rating_from_acpl(episode_acpl)
+                print(
+                    f"[Env {self.environment_id}] Game ended! ACPL={episode_acpl:.2f}, approx. rating={approx_rating}")
+
                 self.acpl_accumulator = 0.0
                 self.acpl_steps = 0
 
             return self.board_to_observation(), reward, done, info
 
         else:
-            # Illegal move
             self.illegal_moves += 1
             return self.board_to_observation(), -1, False, {}
 
@@ -131,12 +134,10 @@ class ChessEnv(Env):
 
         :return: (observation, reward, done, info)
         """
-        # If game is over or there's no actual opponent move, do nothing
         if self.board.is_game_over() or self.opponent == 'self':
             return self.board_to_observation(), 0, self.board.is_game_over(), {}
 
         if self.opponent == 'stockfish' or (self.opponent == 'both' and self.stockfish_is_opponent):
-            # Evaluate before Stockfish moves
             if self.stockfish:
                 self.stockfish.set_fen_position(self.board.fen())
                 previous_evaluation = self.stockfish.get_evaluation()
@@ -151,7 +152,6 @@ class ChessEnv(Env):
                 self.board.push(chess.Move.from_uci(best_move))
                 self.legal_moves += 1
 
-                # Update history
                 self.move_history.append(
                     self.board_to_observation()[:, :, :13])
                 if len(self.move_history) > self.history_length:
@@ -160,7 +160,6 @@ class ChessEnv(Env):
                 done = self.board.is_game_over()
                 reward = self.calculate_reward(previous_evaluation)
 
-                # >>> ADIÇÃO: acumular dif CP para ACPL
                 if self.stockfish and not done:
                     self.stockfish.set_fen_position(self.board.fen())
                     current_eval = self.stockfish.get_evaluation()
@@ -180,6 +179,10 @@ class ChessEnv(Env):
                         episode_acpl = 0.0
                     info["episode_acpl"] = episode_acpl
 
+                    approx_rating = approximate_rating_from_acpl(episode_acpl)
+                    print(
+                        f"[Env {self.environment_id}] Game ended! ACPL={episode_acpl:.2f}, approx. rating={approx_rating}")
+
                     self.acpl_accumulator = 0.0
                     self.acpl_steps = 0
 
@@ -196,7 +199,6 @@ class ChessEnv(Env):
         observation = np.zeros(
             (8, 8, 13 + 13 * self.history_length), dtype=np.uint8)
 
-        # Current board state (12 channels for pieces + 1 channel for turn)
         for square in chess.SQUARES:
             piece = self.board.piece_at(square)
             if piece:
@@ -206,9 +208,8 @@ class ChessEnv(Env):
                 observation[rank, file, layer_index] = 1
 
         if self.board.turn == chess.WHITE:
-            observation[:, :, 12] = 1  # White's turn channel
+            observation[:, :, 12] = 1
 
-        # Append historical states
         for i, hist in enumerate(self.move_history):
             start = 13 + 13 * i
             end = 13 + 13 * (i + 1)
@@ -242,7 +243,6 @@ class ChessEnv(Env):
             else:
                 self.stockfish_is_opponent = True
 
-            # Optionally let Stockfish move first if it's white
             if not self.model_plays_white and self.stockfish_is_opponent:
                 if self.stockfish:
                     self.stockfish.set_fen_position(self.board.fen())
@@ -254,6 +254,7 @@ class ChessEnv(Env):
             self.model_plays_white = True
             self.stockfish_is_opponent = False
 
+        print(f"[Env {self.environment_id}] Starting new game...")
         return self.board_to_observation()
 
     def decode_action(self, action):
@@ -289,26 +290,20 @@ class ChessEnv(Env):
         :return: The numeric reward for this step.
         """
         if self.stockfish:
-            # Trocar _set_option para set_option se preferir algo mais oficial
             self.stockfish._set_option("MultiPV", 3)
             self.stockfish._set_option("UCI_ShowWDL", True)
             self.stockfish.set_fen_position(self.board.fen())
             current_evaluation = self.stockfish.get_evaluation()
 
-            # Checkmate case
             if current_evaluation['type'] == 'mate':
                 raw_reward = 100000 if current_evaluation['value'] > 0 else -100000
                 return raw_reward if self.model_plays_white else -raw_reward
 
-            # If not mate, do a simple difference-based reward
             raw_reward = 0
-            if (previous_evaluation and previous_evaluation['type'] == 'cp'
-               and current_evaluation['type'] == 'cp'):
-                # Difference in centipawns from Stockfish's perspective (white).
-                raw_reward = (current_evaluation['value']
-                              - previous_evaluation['value'])
+            if (previous_evaluation and previous_evaluation['type'] == 'cp' and current_evaluation['type'] == 'cp'):
+                raw_reward = (
+                    current_evaluation['value'] - previous_evaluation['value'])
 
-            # Adjust for agent's color (if the agent is black, invert the sign)
             if not self.model_plays_white:
                 raw_reward = -raw_reward
 
