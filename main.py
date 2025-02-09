@@ -45,9 +45,9 @@ if __name__ == "__main__":
                         help='Starting ELO rating of Stockfish.')
     parser.add_argument('--elo_end', type=int, default=2000,
                         help='Ending ELO rating of Stockfish.')
-    parser.add_argument('--total_timesteps', type=int, default=100000,
+    parser.add_argument('--total_timesteps', type=int, default=102400,
                         help='Total number of timesteps for training the model.')
-    parser.add_argument('--save_freq', type=int, default=10000,
+    parser.add_argument('--save_freq', type=int, default=4096,
                         help='Frequency of saving the model.')
 
     args = parser.parse_args()
