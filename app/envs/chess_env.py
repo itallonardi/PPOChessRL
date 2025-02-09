@@ -13,6 +13,7 @@ class ChessEnv(Env):
       - An observation space encoding the board state plus move history.
       - Integration with Stockfish for reward calculation.
       - Support for different opponents: self, stockfish, or both.
+      - Now compatible with Maskable PPO from sb3_contrib, using `action_masks()`.
     """
     metadata = {'render.modes': ['human']}
 
@@ -33,8 +34,9 @@ class ChessEnv(Env):
         if self.stockfish:
             self.stockfish.set_elo_rating(random.randint(*self.elo_range))
         self.action_space = spaces.Discrete(218)
-        self.observation_space = spaces.Box(low=0, high=1, shape=(
-            8, 8, 13 + 12 * history_length), dtype=np.uint8)
+        self.observation_space = spaces.Box(
+            low=0, high=1, shape=(8, 8, 13 + 12 * history_length), dtype=np.uint8
+        )
         self.history_length = history_length
         self.move_history = []
         self.illegal_moves = 0
@@ -51,7 +53,7 @@ class ChessEnv(Env):
           2) The agent performs its move.
           3) If the opponent is Stockfish (or 'both' with stockfish_is_opponent=True),
              Stockfish makes its move.
-          4) Compute and return the reward based on Stockfish's evaluations, 
+          4) Compute and return the reward based on Stockfish's evaluations,
              considering perspective for white/black.
 
         :param action: The index of the move chosen by the agent.
@@ -66,7 +68,7 @@ class ChessEnv(Env):
 
         # 2) Agent makes its move
         move = self.decode_action(action)
-        if move in self.board.legal_moves:
+        if move and move in self.board.legal_moves:
             self.board.push(move)
 
             # 3) Stockfish's move if applicable
@@ -88,6 +90,7 @@ class ChessEnv(Env):
             reward = self.calculate_reward(previous_evaluation)
             return self.board_to_observation(), reward, done, {}
         else:
+            # Illegal move
             self.illegal_moves += 1
             return self.board_to_observation(), -1, False, {}
 
@@ -153,12 +156,14 @@ class ChessEnv(Env):
 
     def decode_action(self, action):
         """
-        Decodes the action index into an actual legal move:
-          - We map the chosen discrete index into the current list of legal moves,
-            using modulo to wrap around if the index exceeds the number of legal moves.
+        Decodes the action index into an actual chess Move:
+         - If action >= number of legal moves, returns None (illegal).
+         - Otherwise, returns the corresponding move from the current list of legal_moves.
         """
         legal_moves = list(self.board.legal_moves)
-        return legal_moves[action % len(legal_moves)]
+        if 0 <= action < len(legal_moves):
+            return legal_moves[action]
+        return None
 
     def render(self, mode='human'):
         """
@@ -171,13 +176,13 @@ class ChessEnv(Env):
     def calculate_reward(self, previous_evaluation=None):
         """
         Calculates the reward based on Stockfish's evaluations:
-          - If there is a checkmate (type 'mate'), returns +/-100000 depending on 
+          - If there is a checkmate (type 'mate'), returns +/-100000 depending on
             which side is winning, then applies perspective for the agent's color.
-          - Otherwise, uses centipawn evaluations to measure improvement/deterioration 
-            of position from the agent's perspective. Also includes bonuses for the 
+          - Otherwise, uses centipawn evaluations to measure improvement/deterioration
+            of position from the agent's perspective. Also includes bonuses for the
             top moves (MultiPV=3) returned by Stockfish.
 
-        :param previous_evaluation: A dict with the 'type' ('cp' or 'mate') and 'value' 
+        :param previous_evaluation: A dict with the 'type' ('cp' or 'mate') and 'value'
                                     from the board state prior to the agent's move.
         :return: The numeric reward for this step.
         """
@@ -221,3 +226,16 @@ class ChessEnv(Env):
 
             return raw_reward
         return 0
+
+    def action_masks(self):
+        """
+        Returns a boolean mask of shape (218,) indicating which discrete actions 
+        are legal in the current position. True = legal, False = illegal.
+        This method is used by MaskablePPO to avoid selecting illegal moves.
+        """
+        mask = np.zeros(self.action_space.n, dtype=bool)
+        legal_moves = list(self.board.legal_moves)
+        # Mark the indices from 0 to len(legal_moves)-1 as True
+        for i in range(len(legal_moves)):
+            mask[i] = True
+        return mask
