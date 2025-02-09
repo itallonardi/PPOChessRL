@@ -13,7 +13,7 @@ class ChessEnv(Env):
       - An observation space encoding the board state plus move history.
       - Integration with Stockfish for reward calculation.
       - Support for different opponents: self, stockfish, or both.
-      - Now compatible with Maskable PPO from sb3_contrib, using `action_masks()`.
+      - Store the 'turn' channel in the move history as well.
     """
     metadata = {'render.modes': ['human']}
 
@@ -24,7 +24,7 @@ class ChessEnv(Env):
         :param stockfish_path: Path to the Stockfish engine executable.
         :param opponent: Type of opponent ('self', 'stockfish', or 'both').
         :param elo_range: Tuple for random ELO rating range of Stockfish.
-        :param history_length: Number of previous board states to include in the observation.
+        :param history_length: Number of previous board states (including turn channel) in the observation.
         """
         super(ChessEnv, self).__init__()
         self.board = chess.Board()
@@ -33,10 +33,14 @@ class ChessEnv(Env):
         self.stockfish = Stockfish(stockfish_path) if stockfish_path else None
         if self.stockfish:
             self.stockfish.set_elo_rating(random.randint(*self.elo_range))
+        # Changed from (13 + 12 * history_length) to (13 + 13 * history_length)
         self.action_space = spaces.Discrete(218)
         self.observation_space = spaces.Box(
-            low=0, high=1, shape=(8, 8, 13 + 12 * history_length), dtype=np.uint8
+            low=0, high=1,
+            shape=(8, 8, 13 + 13 * history_length),
+            dtype=np.uint8
         )
+
         self.history_length = history_length
         self.move_history = []
         self.illegal_moves = 0
@@ -79,7 +83,8 @@ class ChessEnv(Env):
                 if best_move:
                     self.board.push(chess.Move.from_uci(best_move))
 
-            self.move_history.append(self.board_to_observation()[:, :, :12])
+            # Changed from [:, :, :12] to [:, :, :13], storing the turn channel as well
+            self.move_history.append(self.board_to_observation()[:, :, :13])
             if len(self.move_history) > self.history_length:
                 self.move_history.pop(0)
             self.legal_moves += 1
@@ -90,20 +95,20 @@ class ChessEnv(Env):
             reward = self.calculate_reward(previous_evaluation)
             return self.board_to_observation(), reward, done, {}
         else:
-            # Illegal move
             self.illegal_moves += 1
             return self.board_to_observation(), -1, False, {}
 
     def board_to_observation(self):
         """
-        Builds the observation tensor with shape (8, 8, 13 + 12 * history_length):
-          - 12 channels for piece types (6 per color).
-          - 1 channel for indicating if it's white's turn.
-          - Additional 12 * history_length channels for previous board states.
+        Builds the observation tensor with shape (8, 8, 13 + 13 * history_length):
+          - First 13 channels for the current board state:
+             12 for piece positions, 1 for indicating if it's white's turn.
+          - Next 13 channels per historical state stored in move_history.
         """
         observation = np.zeros(
-            (8, 8, 13 + 12 * self.history_length), dtype=np.uint8)
-        # Current board state
+            (8, 8, 13 + 13 * self.history_length), dtype=np.uint8)
+
+        # Current board state (12 channels for pieces + 1 channel for turn)
         for square in chess.SQUARES:
             piece = self.board.piece_at(square)
             if piece:
@@ -112,11 +117,13 @@ class ChessEnv(Env):
                 rank, file = divmod(square, 8)
                 observation[rank, file, layer_index] = 1
         if self.board.turn == chess.WHITE:
-            observation[:, :, 12] = 1  # White's turn
+            observation[:, :, 12] = 1  # White's turn channel
 
-        # Append historical states
+        # Append historical states (13 channels each)
         for i, hist in enumerate(self.move_history):
-            observation[:, :, 13 + 12 * i: 13 + 12 * (i + 1)] = hist
+            start = 13 + 13 * i
+            end = 13 + 13 * (i + 1)
+            observation[:, :, start:end] = hist
 
         return observation
 
@@ -229,13 +236,12 @@ class ChessEnv(Env):
 
     def action_masks(self):
         """
-        Returns a boolean mask of shape (218,) indicating which discrete actions 
+        Returns a boolean mask of shape (218,) indicating which discrete actions
         are legal in the current position. True = legal, False = illegal.
         This method is used by MaskablePPO to avoid selecting illegal moves.
         """
         mask = np.zeros(self.action_space.n, dtype=bool)
         legal_moves = list(self.board.legal_moves)
-        # Mark the indices from 0 to len(legal_moves)-1 as True
         for i in range(len(legal_moves)):
             mask[i] = True
         return mask
