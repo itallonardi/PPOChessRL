@@ -1,9 +1,10 @@
 import argparse
 from app.envs.chess_env import ChessEnv
 from app.agents.ppo_agent import initialize_ppo
-from stable_baselines3.common.callbacks import CheckpointCallback
+from stable_baselines3.common.callbacks import CheckpointCallback, CallbackList
 from dotenv import load_dotenv
 import os
+from app.callbacks.training_log_callback import ChessRatingLogger
 
 load_dotenv()
 
@@ -18,10 +19,17 @@ def main(args):
     model = initialize_ppo(env, model_path=model_path)
     checkpoint_callback = CheckpointCallback(
         save_freq=args.save_freq, save_path='./models/', name_prefix='chess_model')
+    rating_logger = ChessRatingLogger(
+        log_path="training_rating_log.csv", verbose=1)
 
     try:
-        model.learn(total_timesteps=args.total_timesteps,
-                    callback=checkpoint_callback)
+        # Adicionamos ambos os callbacks em uma CallbackList
+        callback_list = CallbackList([checkpoint_callback, rating_logger])
+
+        model.learn(
+            total_timesteps=args.total_timesteps,
+            callback=callback_list
+        )
         model.save(model_path)
         print(f"Model trained and saved at: {model_path}")
     except Exception as e:

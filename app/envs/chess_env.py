@@ -35,7 +35,6 @@ class ChessEnv(Env):
         self.stockfish = Stockfish(stockfish_path) if stockfish_path else None
         if self.stockfish:
             self.stockfish.set_elo_rating(random.randint(*self.elo_range))
-        # Note: shape includes turn channel + history. 13 for current state, plus 13 per history slot.
         self.action_space = spaces.Discrete(218)
         self.observation_space = spaces.Box(
             low=0, high=1,
@@ -51,6 +50,9 @@ class ChessEnv(Env):
         self.checkmates = 0
         self.model_plays_white = True
         self.stockfish_is_opponent = False
+
+        self.acpl_accumulator = 0.0
+        self.acpl_steps = 0
 
     def step(self, action):
         """
@@ -86,7 +88,32 @@ class ChessEnv(Env):
             # 3) Reward and done
             done = self.board.is_game_over()
             reward = self.calculate_reward(previous_evaluation)
-            return self.board_to_observation(), reward, done, {}
+
+            current_eval = None
+            if self.stockfish:
+                self.stockfish.set_fen_position(self.board.fen())
+                current_eval = self.stockfish.get_evaluation()
+
+            if previous_evaluation and current_eval:
+                if previous_evaluation['type'] == 'cp' and current_eval['type'] == 'cp':
+                    step_diff = abs(
+                        current_eval['value'] - previous_evaluation['value'])
+                    self.acpl_accumulator += step_diff
+                    self.acpl_steps += 1
+
+            info = {}
+            if done:
+                if self.acpl_steps > 0:
+                    episode_acpl = self.acpl_accumulator / self.acpl_steps
+                else:
+                    episode_acpl = 0.0
+                info["episode_acpl"] = episode_acpl
+
+                self.acpl_accumulator = 0.0
+                self.acpl_steps = 0
+
+            return self.board_to_observation(), reward, done, info
+
         else:
             # Illegal move
             self.illegal_moves += 1
@@ -132,16 +159,39 @@ class ChessEnv(Env):
 
                 done = self.board.is_game_over()
                 reward = self.calculate_reward(previous_evaluation)
-                return self.board_to_observation(), reward, done, {}
 
-        # If we got here, there's no move or we didn't push anything
+                # >>> ADIÇÃO: acumular dif CP para ACPL
+                if self.stockfish and not done:
+                    self.stockfish.set_fen_position(self.board.fen())
+                    current_eval = self.stockfish.get_evaluation()
+
+                    if previous_evaluation and current_eval:
+                        if previous_evaluation['type'] == 'cp' and current_eval['type'] == 'cp':
+                            step_diff = abs(
+                                current_eval['value'] - previous_evaluation['value'])
+                            self.acpl_accumulator += step_diff
+                            self.acpl_steps += 1
+
+                info = {}
+                if done:
+                    if self.acpl_steps > 0:
+                        episode_acpl = self.acpl_accumulator / self.acpl_steps
+                    else:
+                        episode_acpl = 0.0
+                    info["episode_acpl"] = episode_acpl
+
+                    self.acpl_accumulator = 0.0
+                    self.acpl_steps = 0
+
+                return self.board_to_observation(), reward, done, info
+
         return self.board_to_observation(), 0, self.board.is_game_over(), {}
 
     def board_to_observation(self):
         """
-        Builds the observation tensor with shape (8, 8, 13 + 13 * history_length):
+        Builds the observation tensor with shape (8, 8, 13 + 13 * self.history_length):
           - First 13 channels for the current board state (12 for pieces + 1 for turn).
-          - Next 13 channels per historical state stored in move_history.
+          - Next 13 channels per historical state stored in self.move_history.
         """
         observation = np.zeros(
             (8, 8, 13 + 13 * self.history_length), dtype=np.uint8)
@@ -154,6 +204,7 @@ class ChessEnv(Env):
                     (0 if piece.color == chess.WHITE else 1)
                 rank, file = divmod(square, 8)
                 observation[rank, file, layer_index] = 1
+
         if self.board.turn == chess.WHITE:
             observation[:, :, 12] = 1  # White's turn channel
 
@@ -179,6 +230,10 @@ class ChessEnv(Env):
         self.legal_moves = 0
         self.checks = 0
         self.checkmates = 0
+
+        self.acpl_accumulator = 0.0
+        self.acpl_steps = 0
+
         if self.opponent in ['stockfish', 'both']:
             self.stockfish.set_elo_rating(random.randint(*self.elo_range))
             self.model_plays_white = random.choice([True, False])
@@ -234,6 +289,7 @@ class ChessEnv(Env):
         :return: The numeric reward for this step.
         """
         if self.stockfish:
+            # Trocar _set_option para set_option se preferir algo mais oficial
             self.stockfish._set_option("MultiPV", 3)
             self.stockfish._set_option("UCI_ShowWDL", True)
             self.stockfish.set_fen_position(self.board.fen())
