@@ -6,7 +6,7 @@ import numpy as np
 from stable_baselines3 import PPO
 import cairosvg
 import io
-from main import ChessEnv
+from app.envs.chess_env import ChessEnv
 
 
 class InteractiveChessEnv(ChessEnv):
