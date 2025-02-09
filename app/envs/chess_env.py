@@ -34,9 +34,11 @@ class ChessEnv(Env):
         self.board = chess.Board()
         self.opponent = opponent
         self.elo_range = elo_range
-        self.stockfish = Stockfish(stockfish_path) if stockfish_path else None
-        if self.stockfish:
-            self.stockfish.set_elo_rating(random.randint(*self.elo_range))
+
+        # Guardamos apenas o path. Stockfish será criado no reset.
+        self.stockfish_path = stockfish_path
+        self.stockfish = None
+
         self.action_space = spaces.Discrete(218)
         self.observation_space = spaces.Box(
             low=0, high=1,
@@ -58,18 +60,29 @@ class ChessEnv(Env):
 
         self.environment_id = environment_id
 
+    # >>> MÉTODOS PARA EVITAR PICKLE DO STOCKFISH
+    def __getstate__(self):
+        """
+        Before pickling (e.g. SubprocVecEnv fork), remove the Stockfish object.
+        """
+        state = self.__dict__.copy()
+        if 'stockfish' in state:
+            del state['stockfish']
+        return state
+
+    def __setstate__(self, state):
+        """
+        After unpickling, restore the dictionary. We set stockfish=None
+        so it will be recreated on reset if needed.
+        """
+        self.__dict__.update(state)
+        self.stockfish = None
+    # <<<
+
     def step(self, action):
         """
         Executes a step for the agent ONLY. Does not automatically perform the opponent's move.
-
-        1) Retrieve the evaluation of the current board state (before the agent moves).
-        2) The agent performs its move.
-        3) Compute and return the reward based on Stockfish's evaluations,
-           considering perspective for white/black (pure difference plus checkmate).
-        4) No Stockfish move is performed here (call step_opponent() if needed).
-
-        :param action: The index of the move chosen by the agent.
-        :return: (observation, reward, done, info)
+        ...
         """
         if self.stockfish:
             self.stockfish.set_fen_position(self.board.fen())
@@ -125,14 +138,7 @@ class ChessEnv(Env):
     def step_opponent(self):
         """
         Performs the opponent's move (Stockfish or otherwise), if applicable, in a separate step.
-        This allows a more explicit turn-based approach: agent moves in step(), then if not done,
-        you call step_opponent() to let Stockfish play.
-
-        NOTE: This method does nothing if:
-          - The game is already over, or
-          - The opponent is 'self' (no external move needed).
-
-        :return: (observation, reward, done, info)
+        ...
         """
         if self.board.is_game_over() or self.opponent == 'self':
             return self.board_to_observation(), 0, self.board.is_game_over(), {}
@@ -193,8 +199,7 @@ class ChessEnv(Env):
     def board_to_observation(self):
         """
         Builds the observation tensor with shape (8, 8, 13 + 13 * self.history_length):
-          - First 13 channels for the current board state (12 for pieces + 1 for turn).
-          - Next 13 channels per historical state stored in self.move_history.
+        ...
         """
         observation = np.zeros(
             (8, 8, 13 + 13 * self.history_length), dtype=np.uint8)
@@ -235,7 +240,11 @@ class ChessEnv(Env):
         self.acpl_accumulator = 0.0
         self.acpl_steps = 0
 
-        if self.opponent in ['stockfish', 'both']:
+        # Se self.stockfish for None, criamos agora
+        if self.stockfish is None and self.stockfish_path:
+            self.stockfish = Stockfish(self.stockfish_path)
+
+        if self.opponent in ['stockfish', 'both'] and self.stockfish:
             self.stockfish.set_elo_rating(random.randint(*self.elo_range))
             self.model_plays_white = random.choice([True, False])
             if self.opponent == 'both':
@@ -244,12 +253,11 @@ class ChessEnv(Env):
                 self.stockfish_is_opponent = True
 
             if not self.model_plays_white and self.stockfish_is_opponent:
-                if self.stockfish:
-                    self.stockfish.set_fen_position(self.board.fen())
-                    first_move = self.stockfish.get_best_move()
-                    if first_move:
-                        self.board.push(chess.Move.from_uci(first_move))
-                        self.legal_moves += 1
+                self.stockfish.set_fen_position(self.board.fen())
+                first_move = self.stockfish.get_best_move()
+                if first_move:
+                    self.board.push(chess.Move.from_uci(first_move))
+                    self.legal_moves += 1
         else:
             self.model_plays_white = True
             self.stockfish_is_opponent = False
@@ -284,10 +292,6 @@ class ChessEnv(Env):
           - Otherwise, returns the difference in centipawns between current and previous
             evaluation (also adjusted for agent's color if it is black).
           - No extra reward from top Stockfish moves is added (purely difference-based).
-
-        :param previous_evaluation: A dict with the 'type' ('cp' or 'mate') and 'value'
-                                    from the board state prior to the move.
-        :return: The numeric reward for this step.
         """
         if self.stockfish:
             self.stockfish._set_option("MultiPV", 3)
@@ -300,7 +304,8 @@ class ChessEnv(Env):
                 return raw_reward if self.model_plays_white else -raw_reward
 
             raw_reward = 0
-            if (previous_evaluation and previous_evaluation['type'] == 'cp' and current_evaluation['type'] == 'cp'):
+            if (previous_evaluation and previous_evaluation['type'] == 'cp'
+               and current_evaluation['type'] == 'cp'):
                 raw_reward = (
                     current_evaluation['value'] - previous_evaluation['value'])
 
